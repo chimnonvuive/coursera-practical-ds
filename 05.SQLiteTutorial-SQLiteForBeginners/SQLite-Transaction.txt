@@ -1,0 +1,38 @@
+-- Guarantees all the transactions are ACID compliant even if the transaction is interrupted by a program crash, operation system dump, or power failure to the computer
+CREATE TABLE accounts ( 
+	account_no 	INTEGER 	NOT NULL, 
+	balance 	DECIMAL 	NOT NULL DEFAULT 0,
+	PRIMARY KEY(account_no),
+        CHECK(balance >= 0)
+);
+CREATE TABLE account_changes (
+	change_no 	INTEGER 	NOT NULL PRIMARY KEY,
+	account_no 	INTEGER 	NOT NULL, 
+	flag 		TEXT 		NOT NULL, 
+	amount 		DECIMAL 	NOT NULL, 
+	changed_at 	TEXT 		NOT NULL 
+);
+
+INSERT INTO accounts (account_no,balance) VALUES (100,20100);
+INSERT INTO accounts (account_no,balance) VALUES (200,10100);
+
+BEGIN TRANSACTION;
+UPDATE accounts SET balance=balance-1e3 WHERE account_no=100;
+UPDATE accounts SET balance=balance+1e3 WHERE account_no=200;
+INSERT INTO account_changes(change_no,account_no,flag,amount,changed_at) VALUES(1,100,'-',1e3,datetime('now'));
+INSERT INTO account_changes(change_no,account_no,flag,amount,changed_at) VALUES(2,200,'+',1e3,datetime('now'));
+COMMIT;
+SELECT * FROM accounts;
+SELECT * FROM account_changes;
+
+BEGIN TRANSACTION;
+UPDATE accounts SET balance=balance-20e3 WHERE account_no=100;
+INSERT INTO account_changes(change_no,account_no,flag,amount,changed_at) VALUES(3,100,'-',20e3,datetime('now'));
+SELECT * FROM account_changes;
+ROLLBACK;
+
+SELECT * FROM accounts;
+SELECT * FROM account_changes;
+
+DROP TABLE accounts;
+DROP TABLE account_changes;

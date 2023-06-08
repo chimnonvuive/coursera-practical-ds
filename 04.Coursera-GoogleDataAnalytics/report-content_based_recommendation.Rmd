@@ -1,0 +1,415 @@
+---
+title: "Fuzzy Logic Induced Content-Based Recommendation"
+author: "Nguyen Quy Khoi"
+date: "June 01, 2023"
+geometry: "left=1in,right=0.5in,top=1in,bottom=1in"
+output:
+  pdf_document:
+    highlight: tango
+    #latex_engine: xelatex
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+fontsize: 12pt
+fontfamily: "newtx"
+urlcolor: blue
+---
+
+```{r setup, include=FALSE, results='hide'}
+# save the built-in output hook
+hook_output <- knitr::knit_hooks$get("output")
+n = 10
+# set a new output hook to truncate text output
+knitr::knit_hooks$set(output = function(x, options) {
+  if (!is.null(n <- options$out.lines)) {
+    x <- xfun::split_lines(x)
+    if (length(x) > n) {
+      # truncate the output
+      x <- c(head(x, n*0.7), '....', tail(x, n*0.3 + 1))
+    }
+    x <- paste(x, collapse = "\n")
+  }
+  hook_output(x, options)
+})
+```
+
+\newpage
+
+# Introduction to content-based recommendation
+
+When a friend comes to you for a movie recommendation, you don't arbitrarily start shooting movie names. You try to suggest movies while keeping in mind your friend's tastes. Content-based recommendation systems, also known as content-based filtering methods, try to mimic the exact same process.
+
+Consider a scenario in which a user is browsing through a list of products. Given a set of products and the associated product properties, when a person views a particular product, content-based recommendation systems can generate a subset of products with similar properties to the one currently being viewed by the user.
+
+The following example demonstrates how content-based recommendation systems work.
+
+## Introduction to wine suggestion system
+
+An example of using content-based recommendation is wine suggestion. We will use the wine data set from [UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/wine). This data set is the result of the chemical analysis of wine grown in the same region in Italy. We have data from three different [cultivars](https://en.wikipedia.org/wiki/Cultivar) (from an assemblage of plants selected for desirable characters).
+
+In the data set, rows represent each wine brand, while the columns represent the properties of the wines. The table is extracted from UCI machine learning repository as follows:
+
+```{r, message=FALSE}
+# data.table provides a high-performance version of base R's data.frame with 
+# syntax and feature enhancements for ease of use, convenience and
+# programming speed.
+library(data.table)
+library(here); library(skimr); library(janitor)
+# differences between "<-" and "="
+# "<-" is for assignment, standard everywhere
+# "=" is for passing arguments, (allowed only for top level env)
+#wine.data <- fread('https://archive.ics.uci.edu/ml/machine-learning-databases/wine/wine.data')
+wine.data <- fread('data\\wine.data')
+skim_without_charts(as.data.frame(wine.data))
+```
+
+## Chemical properties similarity between two wines
+
+We have a total of 14 columns. The first column `V1` represents the cultivar, which is assigned in `wine.type`. The remaining columns are the chemical properties of the wine, which are stored in `wine.features`:
+
+```{r}
+wine.type <- wine.data[,1]
+wine.features <- wine.data[,-1]
+# scale feature properties such that each column has mean=0 and std=1
+wine.features.scaled <- scale(wine.features)
+# convert feature properties into matrix to perform linear algebra operations
+wine.mat <- data.matrix(wine.features.scaled)
+# assign row names for matrix wine.mat (name = sequence from 1 to 178)
+rownames(wine.mat) <- seq(1:dim(wine.features.scaled)[1])
+# transpose the matrix, feature properties are row, wines are column
+# to perform pearson coefficient calculation between 2 columns
+wine.mat <- t(wine.mat)
+
+```
+
+The pairwise correlation in the numerical matrix is measured using Pearson coefficient after scaling. In this problem, the Pearson coefficient matrix returns *the similarity between 2 wines* (i.e., compare 2 columns).
+
+The output is the similarity matrix, which shows how closely related items are. The values range from -1 for perfect negative correlation, when two items have attributes that move in opposite directions, and +1 for perfect positive correlation, when attributes for the two items move in the same direction. The diagonal values will be +1, as we are comparing a wine to itself.
+
+```{r}
+# perform pearson correlation calculation, which returns an 178x178 matrix
+cor.matrix <- cor(wine.mat, use="pairwise.complete.obs", method="pearson")
+```
+
+## Test case: Find top 4 similar wines to wine `3`
+
+In this problem, the similarity matrix is useful for finding similar wines (target column) in the wine's catalog. For example, if a customer likes wine `3` and wants to know if the company's list of wines has something similar. Using the similarity matrix, we will look at the third row to find any wines having high correlation value (i.e., column value closer to 1). **The top 4 matches** of wine `3` in terms of chemical properties are wines `52`, `51`, `85`, and `15`. The chemical properties of the matching wines are shown below:
+
+```{r}
+sim.items <- cor.matrix[3,]
+# find the closest match by sorting row 3 in decreasing order
+sim.items.sorted <- sort(sim.items, decreasing=TRUE)
+# take out top 5 matches
+sim.items.name <- names(sim.items.sorted[2:5])
+rbind(wine.data[as.double(sim.items.name),])
+```
+
+# Case study: News aggregator
+
+## Problem statement
+
+We have 1,000 news articles from different publishers in different categories: technical, entertainment, etc. The problem is building a recommendation system for anonymous customers. The customers either are first time visitors or we have not recorded their interaction with our products.
+
+```{r, message=FALSE, out.line=n}
+# 
+library(dplyr)
+library(ggplot2)
+library(sentimentr); library(sets); library(slam)
+library(tidytext); library(tidyverse); library(tm)
+
+data.population <- read_tsv('data\\NewsAggregatorDataset\\newsCorpora.csv', 
+                   col_names=c('ID','TITLE','URL','PUBLISHER','CATEGORY',
+                               'STORY','HOSTNAME','TIMESTAMP'),
+                   col_types=cols(
+                     ID       =col_integer(),
+                     TITLE    =col_character(),
+                     URL      =col_character(),
+                     PUBLISHER=col_character(),
+                     CATEGORY =col_character(),
+                     STORY    =col_character(),
+                     HOSTNAME =col_character(),
+                     TIMESTAMP=col_double()))
+
+# sample without replacement 40,000 random data in the whole data set
+index.sampled <- sample(1:nrow(data.population), 40000, replace=FALSE)
+data.sample <- data.population[index.sampled,]
+```
+
+Every article has the following columns:
+
+-   `ID`: A unique identifier.
+
+-   `TITLE`: The title of the article (free text).
+
+-   `URL`: The article's URL.
+
+-   `PUBLISHER`: Publisher of the article.
+
+-   `CATEGORY`: Categorization under which the articles are grouped (`b` = business, `t` = science and technology, `e` = entertainment, `m` = health).
+
+-   `STORY`: An ID for the group of stories the article belongs to.
+
+-   `HOSTNAME`: Hostname of the URL.
+
+-   `TIMESTAMP`: Approximate time the news was published, as the number of milliseconds since the epoch 00:00:00 GMT, January 1, 1970.
+
+## Exploratory Data Analysis
+
+Firstly, the articles are grouped by category (as specified by `CATEGORY`) and arranged in a descending order. From observation, entertainment has the highest number of published articles.
+
+```{r}
+ggplot(data.sample, mapping=aes(x=CATEGORY, fill=factor(CATEGORY))) +
+  geom_bar(colour='black',stat='count') +
+  ggtitle("Number of articles by category") + 
+  xlab("Article category") +
+  ylab("Number of articles") + 
+  scale_fill_discrete(name='Category',
+                      breaks=c('e','b','t','m'),
+                      labels=c("entertainment","business",
+                               "science and technology","health")) +
+  theme(plot.title=element_text(lineheight=1, face="bold"))
+```
+
+Secondly, we order the publishers in descending order by the number of published articles. `Reuters` publishes the most articles, followed by `Businessweek`. Then, all articles of the top 100 publishers are obtained from `newsCorpora.csv` to design content-based recommendation engine.
+
+```{r, message=FALSE, out.lines=n}
+publisher.top <- data.sample |> group_by(PUBLISHER) |> summarise(count=n()) |> 
+                          arrange(desc(count), PUBLISHER)
+publisher.top
+
+# get top 100 publishers, join with article tables
+data.subset <- inner_join(data.frame(publisher.top[1:100,]), data.sample)
+```
+
+## Content-based recommendation engine design
+
+The problem statement from customer requirements is: **When a customer browses a particular article, what other articles should we suggest to him?** From the statement, some properties of the news articles must be analyzed to provide a similar content to the one the user is reading. Those properties are:
+
+-   The article's content.
+-   The article's publisher.
+-   The article's category.
+
+## Design procedure
+
+**Cosine distance** compares words between two documents.
+
+### 
+
+**Jaccard distance** measures the publishers and categories
+
+1.  Calculate **cosine distance**. The similarity matrix's dimension is $R^{N \times N}$, with $N$ is the number of rows/columns. In this problem, the rows/columns are the 40,000 articles in the sampled data set. The similarity score is an entry in the matrix, ranging from 0 to 1. The score 0 indicates there is no relationship between two articles, while the score 1 means the two articles are an exact replica of each other.
+2.  Search for relevant news articles in the similarity index. Given an article,
+3.  Implement a fuzzy ranking engine. The ranking engine finds the top 10 matches in a ranked order using the cosine distance, Jaccard distance, and Manhattan distance.
+
+## Design procedure
+
+The articles list separated into two data frames: `title.df` and `others.df`. Data frame `title.df` stores article titles while `others.df` stores articles' ID, publisher, and category. Stemming algorithms are excluded in this problem.
+
+The text transformation process is summarized in 5 steps:
+
+1.  `removePunctuation`: remove punctuation
+
+2.  `removeNumbers`: remove numbers
+
+3.  `stripWhitespace`: remove unnecessary white spaces
+
+4.  `content_transformer`: change words to upper or lower case, depending on the inputs. In this problem, the text is converted to lower case with `tolower` argument. In this way, algorithms can treat "Dog" and "dog" the same.
+
+5.  `stopwords`: remove common words in a language. Some examples of stop words in English content are *the*, *is*, *at*, *which*, *and*, *on*, etc.
+
+```{r, out.lines=n}
+title.df  <- data.subset[,c('ID','TITLE')]
+others.df <- data.subset[,c('ID','PUBLISHER','CATEGORY')]
+
+corpus <- title.df |> rename(all_of(c(doc_id='ID',text='TITLE'))) |>
+  DataframeSource() |> Corpus() |> 
+  # text transformation in 5 steps below
+  tm_map(removePunctuation) |>
+  tm_map(removeNumbers) |> 
+  tm_map(stripWhitespace) |>
+  tm_map(content_transformer(tolower)) |>
+  tm_map(removeWords, stopwords("english"))
+
+dtm <- DocumentTermMatrix(corpus, control=list(wordLength=c(3,10),
+                                               weighting="weightTfIdf"))
+dtm
+inspect(dtm[1:5,10:15])
+
+```
+
+```{r, out.lines=n}
+
+# calculate cosine similarity
+sim.score <- tcrossprod_simple_triplet_matrix(dtm) /
+  (sqrt(row_sums(dtm^2) %*% t(row_sums(dtm^2))))
+
+user.read <- sim.score |> sample_n(1)
+match.docs <- sim.score[user.read,]
+match.docs
+match.df <- data.frame(ID=names(match.docs), cosine=match.docs,
+                       stringsAsFactors=FALSE)
+match.df$ID <- as.integer(match.df$ID)
+match.refined <- head(match.df[order(-match.df$cosine),],30)
+match.refined
+
+```
+
+```{r}
+################## Polarity score ###############
+
+match.refined <- match.refined |> inner_join(title.df) |> inner_join(others.df)
+sentiment.score <- sentiment(match.refined$TITLE) |> group_by(element_id) |>
+  summarise(sentiment=mean(sentiment))
+as_tibble(sentiment.score)
+
+match.refined$polarity <- sentiment.score$sentiment
+as_tibble(match.refined)
+  
+#help("sentiment")
+
+target.publisher <- match.refined[1,]$PUBLISHER
+target.category  <- match.refined[1,]$CATEGORY
+target.polarity  <- match.refined[1,]$polarity
+target.title     <- match.refined[1,]$TITLE
+
+
+#match.refined <- match.refined[-1,]
+match.refined$is.publisher <- match.refined$PUBLISHER == target.publisher
+match.refined$is.publisher <- as.numeric(match.refined$is.publisher)
+
+match.refined$is.category <- match.refined$CATEGORY == target.category
+match.refined$is.category <- as.numeric(match.refined$is.category)
+
+# Calculate Jaccards
+match.refined$jaccard <- (match.refined$is.publisher + match.refined$is.category)/2
+match.refined$polaritydiff <- abs(target.polarity - match.refined$polarity)
+
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+match.refined$polaritydiff <- range01(unlist(match.refined$polaritydiff))
+
+
+head(match.refined)
+## clean up
+match.refined$is.publisher = NULL
+match.refined$is.category = NULL
+match.refined$polarity = NULL
+match.refined$sentiment = NULL
+
+
+head(match.refined)
+
+
+### Fuzzy Logic ########
+
+sets_options("universe", seq(from=0, to=1, by=0.1))
+variables <-
+  set(cosine=
+      fuzzy_partition(varnames=c(vlow=0.2, low=0.4, medium=0.6, high=0.8),
+                          FUN=fuzzy_cone, radius=0.2),
+      jaccard=
+      fuzzy_partition(varnames=c(close=1.0, halfway=0.5, far=0.0),
+                          FUN=fuzzy_cone , radius=0.4),
+      polarity=
+      fuzzy_partition(varnames=c(same=0.0, similar=0.3, close=0.5, away=0.7),
+                          FUN = fuzzy_cone , radius = 0.2),
+      ranking =
+      fuzzy_partition(varnames=c(H=1.0, MED=0.7, M=0.5, L=0.3),
+                          FUN = fuzzy_cone , radius = 0.2)
+  )
+
+rules <-
+  set(
+    ######### Low Ranking Rules ###################
+    
+  fuzzy_rule(cosine %is% vlow, 
+               ranking %is% L),
+  fuzzy_rule(cosine %is% low || jaccard %is% far || polarity %is% away,
+               ranking %is% L),
+  fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% away,
+               ranking %is% L),
+  fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% close,
+               ranking %is% L),
+  fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% similar,
+               ranking %is% L),
+  fuzzy_rule(cosine %is% low || jaccard %is% halfway || polarity %is% same,
+               ranking %is% L),
+  fuzzy_rule(cosine %is% medium || jaccard %is% far || polarity %is% away,
+               ranking %is% L),
+    
+    ############### Medium Ranking Rules ##################
+    
+  fuzzy_rule(cosine %is% low || jaccard %is% close || polarity %is% same,
+               ranking %is% M),
+  fuzzy_rule(cosine %is% low && jaccard %is% close && polarity %is% similar,
+               ranking %is% M),
+    
+    ############### Median Ranking Rule ##################
+    
+  fuzzy_rule(cosine %is% medium && jaccard %is% close && polarity %is% same,
+               ranking %is% MED),
+  fuzzy_rule(cosine %is% medium && jaccard %is% halfway && polarity %is% same,
+               ranking %is% MED),
+  fuzzy_rule(cosine %is% medium && jaccard %is% close && polarity %is% similar,
+               ranking %is% MED),
+  fuzzy_rule(cosine%is% medium && jaccard %is% halfway && polarity %is% similar,
+               ranking %is% MED),
+  
+    ############## High Ranking Rule #####################
+    
+  fuzzy_rule(cosine %is% high,
+               ranking %is% H)
+  )
+
+ranking.system <- fuzzy_system(variables, rules)
+print(ranking.system)
+
+plot(ranking.system)
+
+fi <- fuzzy_inference(ranking.system, list(cosine=0.5, jaccard=0, polarity=0.0))
+gset_defuzzify(fi, "centroid")
+plot(fi)
+
+get.ranks <- function(dataframe){
+  cosine   = as.numeric(dataframe['cosine'])
+  jaccard  = as.numeric(dataframe['jaccard'])
+  polarity = as.numeric(dataframe['polaritydiff'])
+  fi <- fuzzy_inference(ranking.system, list(cosine  =cosine, 
+                                             jaccard =jaccard, 
+                                             polarity=polarity))
+  return(gset_defuzzify(fi, "centroid"))
+}
+
+match.refined$ranking <- apply(match.refined, 1, get.ranks)
+match.refined <- match.refined[order(-match.refined$ranking),]
+as_tibble(match.refined)
+```
+
+# Appendix 1: Self-noted terminologies
+
+There are two different ways to collect samples: **Sampling with replacement** and **sampling without replacement**.
+
+-   **Sampling with replacement** is the method where the items in the samples are *independent* because the outcome of one random draw is not affected by the previous draw. Sampling with replacement is useful in many different scenarios in statistics and machine learning like *bootstrapping*, *bagging*, *boosting*, *random forests*, etc. The sampling method allows generating different models with the same data set. This is less time-consuming and expensive than acquiring new data every time a new model is built.
+
+-   **Sampling without replacement** is the method where the items in the samples are *dependent* because the outcome of one random draw is affected by the previous draw. It is typically useful when we want to select a [random sample](https://www.statology.org/sampling-methods/) from a population.
+
+## Feature engineering
+
+**Polarity of the document**. A subjective content about a topic tends to have a *positive*, *negative*, or *neutral* perspective. Polarity identification algorithms quantify the perspective using text mining. [Manhattan distance](https://en.wikipedia.org/wiki/Taxicab_geometry) is a simple algorithm to measure the polarity value.
+
+In data analysis, **cosine similarity** is a *measure of similarity* between two non-zero vectors defined in an inner product space. Cosine similarity is the cosine of the angle between the vectors; that is, it is the dot product of the vectors divided by the product of their lengths. It follows that the cosine similarity does not depend on the magnitudes of the vectors, but only on their angle. The cosine similarity always belongs to the interval $[-1,1]$. The term cosine distance is commonly used for the complement of cosine similarity in positive space, that is
+
+$$
+\text{cosine distance}=D_C(A,B):=1-S_C(A,B)=1-
+\frac{\displaystyle\sum_{i=1}{n}(A_iB_i)}
+{\displaystyle\sqrt{\sum_{i=1}^nA_i^2}\sqrt{\sum_{i=1}^nB_i^2}}
+$$
+
+The **Jaccard index**, also known as the **Jaccard similarity coefficient**, is a statistic used for gauging the [similarity](#0 "Similarity measure") and [diversity](#0 "Diversity index") of sample sets. The Jaccard coefficient measures similarity between finite sample sets, and is defined as the size of the intersection divided by the size of the union of the sample sets. The **Jaccard distance**, which measures *dis*similarity between sample sets, is complementary to the Jaccard coefficient and is obtained by subtracting the Jaccard coefficient from 1, or, equivalently, by dividing the difference of the sizes of the union and the intersection of two sets by the size of the union:
+
+$$
+d_J(A,B)=1-J(A,B)=\frac{|A\cup B| - |A\cap B|}{|A\cup B|}
+$$
+
+# Bibliography
+
+[Sampling With Replacement vs. Without Replacement](https://www.statology.org/sampling-with-vs-without-replacement/)
