@@ -79,7 +79,6 @@ rownames(wine.mat) <- seq(1:dim(wine.features.scaled)[1])
 # transpose the matrix, feature properties are row, wines are column
 # to perform pearson coefficient calculation between 2 columns
 wine.mat <- t(wine.mat)
-
 ```
 
 The pairwise correlation in the numerical matrix is measured using Pearson coefficient after scaling. In this problem, the Pearson coefficient matrix returns *the similarity between 2 wines* (i.e., compare 2 columns).
@@ -330,6 +329,21 @@ After calculation, all unnecessary columns are removed to rank the related artic
 
 ### Ranking Search Results using Fuzzy Logic
 
+In this problem, the fuzzy logic inputs are cosine, Jaccard, and polarity scores, while the output is the articles' ranking. We first convert them to linguistic variables. For example, let us take our cosine score:
+
+-   `vlow = 0.2` (a very low score)
+-   `low = 0.4` (a low score)
+-   `medium = 0.6`
+-   `high = 0.8`
+
+We then define a membership function that is responsible for constructing fuzzy membership. Since there are no mandates for membership function selection, a cone with a radius of 0.2 is the chosen membership function. If the cosine similarity passes through the membership function, it becomes a linguistic value. The procedure also applies to the polarity score and Jaccard index. 
+
+Finally, a linguistic output variable called ranking score is defined. In the same way as the three inputs, it also has a range and a membership function. A simple rule can be as follows:
+
+-   if `cosine score = vlow`, then `ranking = low`.
+
+We can define more complex rules involving multiple linguistic variables. After evaluating all the rules, we proceed to the inference process. The last step is the defuzzification of the above result into a numerical value. In this problem, the defuzzification technique is the centroid method. The membership plot at the end is responsible for the fuzzification process. 
+
 ```{r}
   #### Fuzzy Logic ####
 sets_options("universe", seq(from=0, to=1, by=0.1))
@@ -339,7 +353,7 @@ variables <- set(
                       FUN=fuzzy_cone, radius=0.2),
   jaccard=
   fuzzy_partition(varnames=c(close=1.0, halfway=0.5, far=0.0),
-                      FUN=fuzzy_cone , radius=0.4),
+                      FUN=fuzzy_cone , radius=0.2),
   polarity=
   fuzzy_partition(varnames=c(same=0.0, similar=0.3, close=0.5, away=0.7),
                       FUN = fuzzy_cone , radius = 0.2),
@@ -351,7 +365,7 @@ variables <- set(
 rules <- set(
   #### Fuzzy Rule ####
   # Low Ranking Rules
-  fuzzy_rule(cosine %is% vlow, 
+  fuzzy_rule(cosine == vlow, 
                ranking %is% L),
   fuzzy_rule(cosine %is% low || jaccard %is% far || polarity %is% away,
                ranking %is% L),
