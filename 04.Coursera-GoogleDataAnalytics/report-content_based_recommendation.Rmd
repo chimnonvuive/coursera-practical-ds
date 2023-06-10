@@ -110,7 +110,7 @@ rbind(wine.data[as.double(sim.items.name),])
 
 We have 1,000 news articles from different publishers in different categories: technical, entertainment, etc. The problem is building a recommendation system for anonymous customers. The customers either are first time visitors or we have not recorded their interaction with our products.
 
-```{r, message=FALSE, out.line=n}
+```{r message=FALSE, out.line=n}
 # 
 library(dplyr)
 library(ggplot2)
@@ -130,6 +130,7 @@ data.population <- read_tsv('data\\NewsAggregatorDataset\\newsCorpora.csv',
                      HOSTNAME =col_character(),
                      TIMESTAMP=col_double()))
 
+num.articles = 10 # number of related articles to recommend to the user
 # sample without replacement 40,000 random data in the whole data set
 index.sampled <- sample(1:nrow(data.population), 40000, replace=FALSE)
 data.sample <- data.population[index.sampled,]
@@ -158,27 +159,30 @@ Every article has the following columns:
 Firstly, the articles are grouped by category (as specified by `CATEGORY`) and arranged in a descending order. From observation, entertainment has the highest number of published articles.
 
 ```{r}
-ggplot(data.sample, mapping=aes(x=CATEGORY, fill=factor(CATEGORY))) +
-  geom_bar(colour='black',stat='count') +
+ggplot(data.sample) +
+  geom_bar(mapping=aes(x=CATEGORY, fill=factor(CATEGORY)),
+      	   colour ='black',
+      	   stat   ='count') +
   ggtitle("Number of articles by category") + 
   xlab("Article category") +
   ylab("Number of articles") + 
-  scale_fill_discrete(name='Category',
+  scale_fill_discrete(name  ='Category',
                       breaks=c('e','b','t','m'),
                       labels=c("entertainment","business",
                                "science and technology","health")) +
   theme(plot.title=element_text(lineheight=1, face="bold"))
 ```
 
-Secondly, we order the publishers in descending order by the number of published articles. `Reuters` publishes the most articles, followed by `Businessweek`. Then, all articles of the top 100 publishers are obtained from `newsCorpora.csv` to design content-based recommendation engine.
+Secondly, we order the publishers in descending order by the number of published articles. `Reuters` publishes the most articles, followed by `Businessweek`. Then, all articles of the top 100 publishers are obtained from `newsCorpora.csv` to design content-based recommendation engine. In this problem, a user chooses a random article in the top 100 publishers sampled data set `data.subset`.
 
 ```{r, message=FALSE, out.lines=n}
-publisher.top <- data.sample |> group_by(PUBLISHER) |> summarise(count=n()) |> 
-                          arrange(desc(count), PUBLISHER)
+publisher.top <- data.sample |> group_by(PUBLISHER) |>
+        summarise(count=n()) |> arrange(desc(count), PUBLISHER)
 publisher.top
 
 # get top 100 publishers, join with article tables
 data.subset <- inner_join(data.frame(publisher.top[1:100,]), data.sample)
+data.subset$count = NULL
 ```
 
 ## Content-based recommendation engine design
@@ -197,15 +201,35 @@ The problem statement from customer requirements is: **When a customer browses a
 
 **Jaccard distance** measures the publishers and categories
 
-1.  Calculate **cosine distance**. The similarity matrix's dimension is $R^{N \times N}$, with $N$ is the number of rows/columns. In this problem, the rows/columns are the 40,000 articles in the sampled data set. The similarity score is an entry in the matrix, ranging from 0 to 1. The score 0 indicates there is no relationship between two articles, while the score 1 means the two articles are an exact replica of each other.
+1.  Calculate **cosine distance**. The bag-of-words model is constructed from the sampled article data set. Then, a similarity index is created using the vector space model.
 2.  Search for relevant news articles in the similarity index. Given an article,
 3.  Implement a fuzzy ranking engine. The ranking engine finds the top 10 matches in a ranked order using the cosine distance, Jaccard distance, and Manhattan distance.
+4.  
 
-## Design procedure
+## Design process
 
-The articles list separated into two data frames: `title.df` and `others.df`. Data frame `title.df` stores article titles while `others.df` stores articles' ID, publisher, and category. Stemming algorithms are excluded in this problem.
+### Building similarity index
 
-The text transformation process is summarized in 5 steps:
+The code below creates a bag-of-words model using document term matrix representation. The model employs pre-processed documents of the sample `data.subset` to build a corpus.
+
+```{r, out.lines=n}
+# identify articles by their ID
+corpus <- data.subset[,c('ID','TITLE')] |> rename(c(doc_id='ID',
+                                                    text='TITLE')) |>
+  DataframeSource() |> Corpus() |> 
+  # text transformation in 5 steps below
+  tm_map(removePunctuation)            |>
+  tm_map(removeNumbers)                |> 
+  tm_map(stripWhitespace)              |>
+  tm_map(content_transformer(tolower)) |>
+  tm_map(removeWords, stopwords("english"))
+
+dtm <- DocumentTermMatrix(corpus, control=list(wordLength=c(3,20),
+                                               weighting="weightTfIdf"))
+inspect(dtm)
+```
+
+The articles list separated into two data frames: `title.df` and `others.df`. Data frame `title.df` stores article titles while `others.df` stores articles' ID, publisher, and category. Stemming algorithms are excluded in this problem. The documents are pre-processed in five steps. The text transformation process is summarized below:
 
 1.  `removePunctuation`: remove punctuation
 
@@ -217,110 +241,116 @@ The text transformation process is summarized in 5 steps:
 
 5.  `stopwords`: remove common words in a language. Some examples of stop words in English content are *the*, *is*, *at*, *which*, *and*, *on*, etc.
 
-```{r, out.lines=n}
-title.df  <- data.subset[,c('ID','TITLE')]
-others.df <- data.subset[,c('ID','PUBLISHER','CATEGORY')]
-
-corpus <- title.df |> rename(all_of(c(doc_id='ID',text='TITLE'))) |>
-  DataframeSource() |> Corpus() |> 
-  # text transformation in 5 steps below
-  tm_map(removePunctuation) |>
-  tm_map(removeNumbers) |> 
-  tm_map(stripWhitespace) |>
-  tm_map(content_transformer(tolower)) |>
-  tm_map(removeWords, stopwords("english"))
-
-dtm <- DocumentTermMatrix(corpus, control=list(wordLength=c(3,10),
-                                               weighting="weightTfIdf"))
-dtm
-inspect(dtm[1:5,10:15])
-
-```
+The code below performs two tasks: calculate cosine similarity, stored in `sim.score` and randomly choose an article from the sample `data.subset`. The elements in `sim.score` matrix correspond to the cosine similarity between two documents.
 
 ```{r, out.lines=n}
-
 # calculate cosine similarity
 sim.score <- tcrossprod_simple_triplet_matrix(dtm) /
   (sqrt(row_sums(dtm^2) %*% t(row_sums(dtm^2))))
 
-user.read <- sim.score |> sample_n(1)
-match.docs <- sim.score[user.read,]
-match.docs
-match.df <- data.frame(ID=names(match.docs), cosine=match.docs,
-                       stringsAsFactors=FALSE)
-match.df$ID <- as.integer(match.df$ID)
-match.refined <- head(match.df[order(-match.df$cosine),],30)
-match.refined
-
+# randomly choose an article from top 100 publisher sampled data set
+user.read <- sim.score |> colnames() |> data.frame() |> sample_n(1)
+user.article <- data.subset[data.subset$ID==user.read[1,1],]
+t(user.article)
 ```
 
-```{r}
-################## Polarity score ###############
+The output of the code represents the article a user choose. In this problem, the user decided to read **`r user.article$TITLE`** by **`r user.article$PUBLISHER`**. The recommendation engine is responsible for selecting top `r num.articles` similar articles to the article.
 
-match.refined <- match.refined |> inner_join(title.df) |> inner_join(others.df)
-sentiment.score <- sentiment(match.refined$TITLE) |> group_by(element_id) |>
-  summarise(sentiment=mean(sentiment))
-as_tibble(sentiment.score)
+The calculating method for similarity index depends on the problem and objectives of the problem. The reasons cosine similarity is preferred compared to Pearson coefficient are:
 
+-   Cosine similarity is invariant to changes in magnitude of values since it only consider frequency of the words. This is not the case for Pearson coefficient.
+-   Cosine similarity neglects word order while Pearson coefficient is not. Thus, cosine similarity is suitable for *high-dimensional data* like words in a corpus.
+-   Cosine similarity is more robust to outliers or noise than Pearson's coefficient.
+
+### Ranking search results
+
+For this step, the code below extract the IDs of top related articles to **`r user.article$TITLE`**, excluding the article itself.
+
+```{r, out.line=n}
+match.docs  <- sim.score[user.read[1,1],]
+match.df    <- data.frame(ID              =names(match.docs), 
+                          cosine          =match.docs,
+                          stringsAsFactors=FALSE)
+match.df$ID <- as.integer(match.df$ID)
+# organize in descending order, take the top articles, excluding the original 
+match.refined <- match.df |> arrange(desc(cosine)) |> head(num.articles+1)
+```
+
+Since the ID of article `r user.article$TITLE` is `r user.article$ID`, row `r user.article$ID` of `sim.score` is selected. The row is organized in descending order. Then, only `r num.articles` articles with the highest similarity index is are chosen (excluding the original article). 
+
+The code below calculates the sentiment score of the top `r num.articles` articles. Then, the scores are updated in column `polarity` of data frame `match.refined`.
+```{r, out.line=n}
+# inner join with data.subset to include all information about the articles
+match.refined <- match.refined |> inner_join(data.subset)
+# calculate sentiment score of each sentence in top 10 articles
+# using their titles
+sentiment.score <- sentiment(match.refined$TITLE)       |> 
+                   group_by(element_id)                 |>
+                   summarise(sentiment=mean(sentiment))
 match.refined$polarity <- sentiment.score$sentiment
 as_tibble(match.refined)
-  
-#help("sentiment")
+```
 
-target.publisher <- match.refined[1,]$PUBLISHER
-target.category  <- match.refined[1,]$CATEGORY
-target.polarity  <- match.refined[1,]$polarity
-target.title     <- match.refined[1,]$TITLE
+The function `sentiment` calculates the sentiment score of the top `r num.articles` related articles based on their titles. Since the calculation applies to each sentence, if an article title has more than one sentence, it may have two sentiment scores and above. Thus, the mean value is introduced to evaluate the overall score of each title.
 
+The code below calculates the average value of publisher and category Jaccards index. We only concern if the publisher and category of related articles match `r user.article$PUBLISHER` and `r user.article$CATEGORY`, respectively. Thus, the final Jaccard index are the average value of two binary outputs.
 
-#match.refined <- match.refined[-1,]
-match.refined$is.publisher <- match.refined$PUBLISHER == target.publisher
-match.refined$is.publisher <- as.numeric(match.refined$is.publisher)
-
-match.refined$is.category <- match.refined$CATEGORY == target.category
-match.refined$is.category <- as.numeric(match.refined$is.category)
-
-# Calculate Jaccards
+```{r, out.line=n}
+# Jaccard index of publisher
+match.refined$is.publisher <- as.numeric(match.refined$PUBLISHER==
+                                           user.article$PUBLISHER)
+# Jaccard index of category
+match.refined$is.category  <- as.numeric(match.refined$CATEGORY==
+                                           user.article$CATEGORY)
+# average Jaccard value
 match.refined$jaccard <- (match.refined$is.publisher + match.refined$is.category)/2
-match.refined$polaritydiff <- abs(target.polarity - match.refined$polarity)
+```
 
-range01 <- function(x){(x-min(x))/(max(x)-min(x))}
-match.refined$polaritydiff <- range01(unlist(match.refined$polaritydiff))
+The code below calculates the normalized absolute difference between the target article and related articles:
 
+```{r}
+# absolute difference (Manhattan distance)
+match.refined$polaritydiff <- abs(match.refined[1,]$polarity -
+                                    match.refined$polarity)
+# min-max normalization
+f_rescaling <- function(x){(x-min(x)) / (max(x)-min(x))}
+match.refined$polaritydiff <- f_rescaling(match.refined$polaritydiff)
 
-head(match.refined)
-## clean up
+# clean up
 match.refined$is.publisher = NULL
-match.refined$is.category = NULL
-match.refined$polarity = NULL
-match.refined$sentiment = NULL
+match.refined$is.category  = NULL
+match.refined$polarity     = NULL
+match.refined$sentiment    = NULL
+match.refined$STORY        = NULL
+match.refined$HOSTNAME     = NULL
+match.refined$URL          = NULL
+tibble(match.refined)
+```
+After calculation, all unnecessary columns are removed to rank the related articles.
 
+### Ranking Search Results using Fuzzy Logic
 
-head(match.refined)
-
-
-### Fuzzy Logic ########
-
+```{r}
+  #### Fuzzy Logic ####
 sets_options("universe", seq(from=0, to=1, by=0.1))
-variables <-
-  set(cosine=
-      fuzzy_partition(varnames=c(vlow=0.2, low=0.4, medium=0.6, high=0.8),
-                          FUN=fuzzy_cone, radius=0.2),
-      jaccard=
-      fuzzy_partition(varnames=c(close=1.0, halfway=0.5, far=0.0),
-                          FUN=fuzzy_cone , radius=0.4),
-      polarity=
-      fuzzy_partition(varnames=c(same=0.0, similar=0.3, close=0.5, away=0.7),
-                          FUN = fuzzy_cone , radius = 0.2),
-      ranking =
-      fuzzy_partition(varnames=c(H=1.0, MED=0.7, M=0.5, L=0.3),
-                          FUN = fuzzy_cone , radius = 0.2)
+variables <- set(
+  cosine=
+  fuzzy_partition(varnames=c(vlow=0.2, low=0.4, medium=0.6, high=0.8),
+                      FUN=fuzzy_cone, radius=0.2),
+  jaccard=
+  fuzzy_partition(varnames=c(close=1.0, halfway=0.5, far=0.0),
+                      FUN=fuzzy_cone , radius=0.4),
+  polarity=
+  fuzzy_partition(varnames=c(same=0.0, similar=0.3, close=0.5, away=0.7),
+                      FUN = fuzzy_cone , radius = 0.2),
+  ranking =
+  fuzzy_partition(varnames=c(H=1.0, MED=0.7, M=0.5, L=0.3),
+                      FUN = fuzzy_cone , radius = 0.2)
   )
 
-rules <-
-  set(
-    ######### Low Ranking Rules ###################
-    
+rules <- set(
+  #### Fuzzy Rule ####
+  # Low Ranking Rules
   fuzzy_rule(cosine %is% vlow, 
                ranking %is% L),
   fuzzy_rule(cosine %is% low || jaccard %is% far || polarity %is% away,
@@ -336,15 +366,13 @@ rules <-
   fuzzy_rule(cosine %is% medium || jaccard %is% far || polarity %is% away,
                ranking %is% L),
     
-    ############### Medium Ranking Rules ##################
-    
+  # Medium Ranking Rules
   fuzzy_rule(cosine %is% low || jaccard %is% close || polarity %is% same,
                ranking %is% M),
   fuzzy_rule(cosine %is% low && jaccard %is% close && polarity %is% similar,
                ranking %is% M),
     
-    ############### Median Ranking Rule ##################
-    
+  # Median Ranking Rules
   fuzzy_rule(cosine %is% medium && jaccard %is% close && polarity %is% same,
                ranking %is% MED),
   fuzzy_rule(cosine %is% medium && jaccard %is% halfway && polarity %is% same,
@@ -354,12 +382,12 @@ rules <-
   fuzzy_rule(cosine%is% medium && jaccard %is% halfway && polarity %is% similar,
                ranking %is% MED),
   
-    ############## High Ranking Rule #####################
-    
+  # High Ranking Rule
   fuzzy_rule(cosine %is% high,
                ranking %is% H)
   )
 
+  #### ako ####
 ranking.system <- fuzzy_system(variables, rules)
 print(ranking.system)
 
@@ -410,6 +438,44 @@ $$
 d_J(A,B)=1-J(A,B)=\frac{|A\cup B| - |A\cap B|}{|A\cup B|}
 $$
 
+### Bag-of
+
+In a **bag-of-words model**, every document is represented as a collection of words. In the model, the order of words is irrelevant. A good way to organize these bag-of-words models is using a **document term matrix**.
+
+A **document term matrix** is a matrix representation of words in a collection of writings. For instance, we have 100 documents, which is called a *corpus*. In order to build the matrix, we first list out all unique words in 100 documents, which is called a *vocabulary*. If there are 5,000 unique words in 100 documents, the matrix's dimension is 100 x 5,000, where the rows are the documents and the columns are the words in the vocabulary.
+
+Another example, considering a corpus of *sentences*:
+
+1.  **Sentence 1**: Dog chased cat.
+2.  **Sentence 2**: Dog hates cat.
+
+The document term matrix represents the bag-of-words model of the 2 sentences, which is shown below:
+
+| Document/word  | hates | dog | chased | cat |
+|----------------|-------|-----|--------|-----|
+| **Sentence 1** | 0     | 1   | 1      | 1   |
+| **Sentence 2** | 1     | 1   | 0      | 1   |
+
+**Term frequency** is the number of times a word appears in a document. For example, the term frequency of the word "dog" in sentence 1 above is 1, with a normalization of 1/3. Another example is an article that has 500 words, 25 of which mention the word "dog". The term frequency is 25, or 0.05 if it is normalized.
+
+**Document frequency** is the number of documents in the corpus that contain a word. In the example above, the document frequency of the word "dog" in the corpus is 2.
+
+**Inverse document frequency** (IDF) measures how important a word is to a document. The higher the IDF, the more rare and informative the word is.
+
+$$
+IDF(w)=\frac{N\displaystyle}{df(w)}
+$$
+
+**TFIDF** is the product of term frequency (TF) and inverse document frequency (IDF). It is a commonly used weighting metric in text mining. The formula for TFIDF is:
+
+$$
+TFIDF(w,d)=tf(w,d)IDF(w)
+$$
+
+where `tf(w,d)` is the term frequency; `IDF(w)` is the inverse document frequency.
+
 # Bibliography
 
 [Sampling With Replacement vs. Without Replacement](https://www.statology.org/sampling-with-vs-without-replacement/)
+
+[How to Normalize Data in R - Statology](https://www.statology.org/how-to-normalize-data-in-r/)
