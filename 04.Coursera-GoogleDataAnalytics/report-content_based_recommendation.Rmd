@@ -9,7 +9,7 @@ output:
     #latex_engine: xelatex
     number_sections: yes
     toc: yes
-    toc_depth: 2
+    toc_depth: 3
 fontsize: 12pt
 fontfamily: "newtx"
 urlcolor: blue
@@ -107,12 +107,12 @@ rbind(wine.data[as.double(sim.items.name),])
 
 ## Problem statement
 
-We have 1,000 news articles from different publishers in different categories: technical, entertainment, etc. The problem is building a recommendation system for anonymous customers. The customers either are first time visitors or we have not recorded their interaction with our products.
+We have 413840 news articles from different publishers, retrieved from [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/359/news+aggregator) has different categories: technical, entertainment, etc. The problem is building a recommendation system for anonymous customers. The customers either are first time visitors or we have not recorded their interaction with our products.
 
 ```{r message=FALSE, out.line=n}
-# 
 library(dplyr)
 library(ggplot2)
+library(lubridate)
 library(sentimentr); library(sets); library(slam)
 library(tidytext); library(tidyverse); library(tm)
 
@@ -138,19 +138,12 @@ data.sample <- data.population[index.sampled,]
 Every article has the following columns:
 
 -   `ID`: A unique identifier.
-
 -   `TITLE`: The title of the article (free text).
-
 -   `URL`: The article's URL.
-
 -   `PUBLISHER`: Publisher of the article.
-
 -   `CATEGORY`: Categorization under which the articles are grouped (`b` = business, `t` = science and technology, `e` = entertainment, `m` = health).
-
 -   `STORY`: An ID for the group of stories the article belongs to.
-
 -   `HOSTNAME`: Hostname of the URL.
-
 -   `TIMESTAMP`: Approximate time the news was published, as the number of milliseconds since the epoch 00:00:00 GMT, January 1, 1970.
 
 ## Exploratory Data Analysis
@@ -184,28 +177,20 @@ data.subset <- inner_join(data.frame(publisher.top[1:100,]), data.sample)
 data.subset$count = NULL
 ```
 
-## Content-based recommendation engine design
-
+## Design procedure of Content-based recommendation engine design
 The problem statement from customer requirements is: **When a customer browses a particular article, what other articles should we suggest to him?** From the statement, some properties of the news articles must be analyzed to provide a similar content to the one the user is reading. Those properties are:
 
 -   The article's content.
 -   The article's publisher.
 -   The article's category.
 
-## Design procedure
-
-**Cosine distance** compares words between two documents.
-
-### 
-
-**Jaccard distance** measures the publishers and categories
+We are going to design our content-based recommendation engine in three steps, shown as follows:
 
 1.  Calculate **cosine distance**. The bag-of-words model is constructed from the sampled article data set. Then, a similarity index is created using the vector space model.
-2.  Search for relevant news articles in the similarity index. Given an article,
-3.  Implement a fuzzy ranking engine. The ranking engine finds the top 10 matches in a ranked order using the cosine distance, Jaccard distance, and Manhattan distance.
-4.  
+2.  Search for relevant news articles in the similarity index. The recommendation engine first retrieves the top `r num.articles` related articles, sorted in descending order. It is calculated based on the similarity matrix developed in the previous step. For those `r num.articles` articles, we further calculate more features of the polarity of the articles. Then, two other similarity index parameters are the Manhattan distance and the Jaccard index. The Manhattan distance finds the absolute difference between the given article's polarity value and the top `r num.articles` articles, then normalized through min-max normalization. The Jaccard index finds the similarity of the target article and the top `r num.articles` articles based on publisher and category.
+3.  Implement a fuzzy ranking engine. The ranking engine finds the top `r num.articles` matches in a ranked order using the cosine distance, Jaccard distance, and Manhattan distance.
 
-## Design process
+## Design process of Content-based recommendation engine design
 
 ### Building similarity index
 
@@ -275,9 +260,10 @@ match.df$ID <- as.integer(match.df$ID)
 match.refined <- match.df |> arrange(desc(cosine)) |> head(num.articles+1)
 ```
 
-Since the ID of article `r user.article$TITLE` is `r user.article$ID`, row `r user.article$ID` of `sim.score` is selected. The row is organized in descending order. Then, only `r num.articles` articles with the highest similarity index is are chosen (excluding the original article). 
+Since the ID of article `r user.article$TITLE` is `r user.article$ID`, row `r user.article$ID` of `sim.score` is selected. The row is organized in descending order. Then, only `r num.articles` articles with the highest similarity index is are chosen (excluding the original article).
 
 The code below calculates the sentiment score of the top `r num.articles` articles. Then, the scores are updated in column `polarity` of data frame `match.refined`.
+
 ```{r, out.line=n}
 # inner join with data.subset to include all information about the articles
 match.refined <- match.refined |> inner_join(data.subset)
@@ -325,6 +311,7 @@ match.refined$HOSTNAME     = NULL
 match.refined$URL          = NULL
 tibble(match.refined)
 ```
+
 After calculation, all unnecessary columns are removed to rank the related articles.
 
 ### Ranking Search Results using Fuzzy Logic
@@ -336,36 +323,37 @@ In this problem, the fuzzy logic inputs are cosine, Jaccard, and polarity scores
 -   `medium = 0.6`
 -   `high = 0.8`
 
-We then define a membership function that is responsible for constructing fuzzy membership. Since there are no mandates for membership function selection, a cone with a radius of 0.2 is the chosen membership function. If the cosine similarity passes through the membership function, it becomes a linguistic value. The procedure also applies to the polarity score and Jaccard index. 
+We then define a membership function that is responsible for constructing fuzzy membership. Since there are no mandates for membership function selection, a cone with a radius of 0.2 is the chosen membership function. If the cosine similarity passes through the membership function, it becomes a linguistic value. The procedure also applies to the polarity score and Jaccard index.
 
 Finally, a linguistic output variable called ranking score is defined. In the same way as the three inputs, it also has a range and a membership function. A simple rule can be as follows:
 
 -   if `cosine score = vlow`, then `ranking = low`.
 
-We can define more complex rules involving multiple linguistic variables. After evaluating all the rules, we proceed to the inference process. The last step is the defuzzification of the above result into a numerical value. In this problem, the defuzzification technique is the centroid method. The membership plot at the end is responsible for the fuzzification process. 
+The code below defines fuzzy logic to rank suggested articles based on three similarity parameters.
 
 ```{r}
   #### Fuzzy Logic ####
 sets_options("universe", seq(from=0, to=1, by=0.1))
+cone.radius = 0.2
 variables <- set(
   cosine=
   fuzzy_partition(varnames=c(vlow=0.2, low=0.4, medium=0.6, high=0.8),
-                      FUN=fuzzy_cone, radius=0.2),
+                      FUN=fuzzy_cone, radius=cone.radius),
   jaccard=
   fuzzy_partition(varnames=c(close=1.0, halfway=0.5, far=0.0),
-                      FUN=fuzzy_cone , radius=0.2),
+                      FUN=fuzzy_cone, radius=cone.radius*2),
   polarity=
   fuzzy_partition(varnames=c(same=0.0, similar=0.3, close=0.5, away=0.7),
-                      FUN = fuzzy_cone , radius = 0.2),
+                      FUN=fuzzy_cone, radius=cone.radius),
   ranking =
   fuzzy_partition(varnames=c(H=1.0, MED=0.7, M=0.5, L=0.3),
-                      FUN = fuzzy_cone , radius = 0.2)
+                      FUN=fuzzy_cone, radius=cone.radius)
   )
 
 rules <- set(
   #### Fuzzy Rule ####
   # Low Ranking Rules
-  fuzzy_rule(cosine == vlow, 
+  fuzzy_rule(cosine %is% vlow, 
                ranking %is% L),
   fuzzy_rule(cosine %is% low || jaccard %is% far || polarity %is% away,
                ranking %is% L),
@@ -401,32 +389,42 @@ rules <- set(
                ranking %is% H)
   )
 
-  #### ako ####
 ranking.system <- fuzzy_system(variables, rules)
 print(ranking.system)
-
 plot(ranking.system)
-
-fi <- fuzzy_inference(ranking.system, list(cosine=0.5, jaccard=0, polarity=0.0))
-gset_defuzzify(fi, "centroid")
-plot(fi)
-
-get.ranks <- function(dataframe){
-  cosine   = as.numeric(dataframe['cosine'])
-  jaccard  = as.numeric(dataframe['jaccard'])
-  polarity = as.numeric(dataframe['polaritydiff'])
-  fi <- fuzzy_inference(ranking.system, list(cosine  =cosine, 
-                                             jaccard =jaccard, 
-                                             polarity=polarity))
-  return(gset_defuzzify(fi, "centroid"))
-}
-
-match.refined$ranking <- apply(match.refined, 1, get.ranks)
-match.refined <- match.refined[order(-match.refined$ranking),]
-as_tibble(match.refined)
 ```
 
+We can define more complex rules involving multiple linguistic variables. After evaluating all the rules, we proceed to the inference process. The last step is the defuzzification of the above result into a numerical value. In this problem, the defuzzification technique is the centroid method. The membership plot at the end is responsible for the fuzzification process.
+
+The code below ranks articles based on fuzzy logic with three parameters: cosine similarity, Jaccard index, normalized Manhattan distance (or polarity in this context). The output `match.final` is the suggested articles if a user chooses `r user.article$TITLE` from `r user.article$PUBLISHER`
+
+```{r}
+
+get.ranks <- function(dataframe){
+  defuzzied_fi <- ranking.system |> 
+    fuzzy_inference(list(cosine  =as.numeric(dataframe['cosine']),
+                         jaccard =as.numeric(dataframe['jaccard']),
+                         polarity=as.numeric(dataframe['polaritydiff']))) |>
+    gset_defuzzify('centroid')
+  return(defuzzied_fi)
+  }
+
+# apply get.ranks in every row of match.refined to get the fuzzy ranking
+match.refined$ranking <- apply(match.refined, 1, get.ranks)
+match.final <- match.refined |> 
+  select(-one_of('jaccard','polaritydiff','cosine')) |>
+  arrange(desc(ranking)) |>
+  filter(ID!=user.article$ID)
+match.final$ID = NULL
+match.final$TIMESTAMP = as_datetime(match.final$TIMESTAMP/1e3)
+as_tibble(match.final)
+```
+
+\newpage
+
 # Appendix 1: Self-noted terminologies
+
+## Sampling methods
 
 There are two different ways to collect samples: **Sampling with replacement** and **sampling without replacement**.
 
@@ -434,7 +432,7 @@ There are two different ways to collect samples: **Sampling with replacement** a
 
 -   **Sampling without replacement** is the method where the items in the samples are *dependent* because the outcome of one random draw is affected by the previous draw. It is typically useful when we want to select a [random sample](https://www.statology.org/sampling-methods/) from a population.
 
-## Feature engineering
+## Similarity index
 
 **Polarity of the document**. A subjective content about a topic tends to have a *positive*, *negative*, or *neutral* perspective. Polarity identification algorithms quantify the perspective using text mining. [Manhattan distance](https://en.wikipedia.org/wiki/Taxicab_geometry) is a simple algorithm to measure the polarity value.
 
@@ -446,13 +444,13 @@ $$
 {\displaystyle\sqrt{\sum_{i=1}^nA_i^2}\sqrt{\sum_{i=1}^nB_i^2}}
 $$
 
-The **Jaccard index**, also known as the **Jaccard similarity coefficient**, is a statistic used for gauging the [similarity](#0 "Similarity measure") and [diversity](#0 "Diversity index") of sample sets. The Jaccard coefficient measures similarity between finite sample sets, and is defined as the size of the intersection divided by the size of the union of the sample sets. The **Jaccard distance**, which measures *dis*similarity between sample sets, is complementary to the Jaccard coefficient and is obtained by subtracting the Jaccard coefficient from 1, or, equivalently, by dividing the difference of the sizes of the union and the intersection of two sets by the size of the union:
+The **Jaccard index**, also known as the **Jaccard similarity coefficient**, is a statistic used for gauging the [similarity](https://en.wikipedia.org/wiki/Similarity_measure) and [diversity](https://en.wikipedia.org/wiki/Diversity_index) of sample sets. The Jaccard coefficient measures similarity between finite sample sets, and is defined as the size of the intersection divided by the size of the union of the sample sets. The **Jaccard distance**, which measures *dis*similarity between sample sets, is complementary to the Jaccard coefficient and is obtained by subtracting the Jaccard coefficient from 1, or, equivalently, by dividing the difference of the sizes of the union and the intersection of two sets by the size of the union:
 
 $$
 d_J(A,B)=1-J(A,B)=\frac{|A\cup B| - |A\cap B|}{|A\cup B|}
 $$
 
-### Bag-of
+## Information retrieval model
 
 In a **bag-of-words model**, every document is represented as a collection of words. In the model, the order of words is irrelevant. A good way to organize these bag-of-words models is using a **document term matrix**.
 
@@ -490,6 +488,8 @@ where `tf(w,d)` is the term frequency; `IDF(w)` is the inverse document frequenc
 
 # Bibliography
 
-[Sampling With Replacement vs. Without Replacement](https://www.statology.org/sampling-with-vs-without-replacement/)
+[R-Data-Analysis-Projects: R Data Analysis Projects, published by Packt](https://github.com/PacktPublishing/R-Data-Analysis-Projects)
+
+[Sampling With Replacement vs. Without Replacement](https://www.statology.org/sampling-with-vs-without-replacement)
 
 [How to Normalize Data in R - Statology](https://www.statology.org/how-to-normalize-data-in-r/)
